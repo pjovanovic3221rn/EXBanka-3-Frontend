@@ -36,6 +36,10 @@ export const clientRoutes: RouteRecordRaw[] = [
         path: 'payments',
         component: () => import('../views/client/ClientPaymentsView.vue'),
       },
+      {
+        path: 'payments/new',
+        component: () => import('../views/client/ClientNewPaymentView.vue'),
+      },
     ],
   },
 ]
