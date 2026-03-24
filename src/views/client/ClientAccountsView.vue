@@ -352,9 +352,13 @@ onMounted(() => {
               <span style="color:#94a3b8;font-size:12px"> / {{ formatAmount(detailsAccount.mesecniLimit, detailsAccount.currencyKod) }}</span>
             </span>
           </div>
-          <div style="display:flex;justify-content:space-between;padding:12px 0;font-size:14px">
+          <div style="display:flex;justify-content:space-between;padding:12px 0;border-bottom:1px solid #f1f5f9;font-size:14px">
             <span style="color:#64748b">Datum isteka</span>
             <span style="color:#0f172a">{{ detailsAccount.datumIsteka ? new Date(detailsAccount.datumIsteka).toLocaleDateString('sr-RS') : '—' }}</span>
+          </div>
+          <div v-if="detailsAccount.tip === 'tekuci'" style="display:flex;justify-content:space-between;padding:12px 0;font-size:14px">
+            <span style="color:#64748b">Održavanje računa</span>
+            <span style="color:#0f172a">{{ formatAmount(detailsAccount.odrzavanjeRacuna, 'RSD') }}</span>
           </div>
         </div>
 

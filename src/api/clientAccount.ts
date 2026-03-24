@@ -16,6 +16,7 @@ export interface ClientAccountItem {
   dnevnaPotrosnja: number
   mesecnaPotrosnja: number
   datumIsteka: string | null
+  odrzavanjeRacuna: number
   naziv: string
   status: string
 }
