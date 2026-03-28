@@ -2,6 +2,7 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAccountStore } from '../stores/account'
+import { accountApi, type AccountProto } from '../api/account'
 import { clientManagementApi } from '../api/clientManagement'
 import { employeeCardApi, maskCardNumber, CARD_TYPE_LABELS, type Card } from '../api/card'
 
@@ -23,6 +24,28 @@ async function loadClientNames() {
   } catch { /* ignore */ }
 }
 
+async function ensureClientNamesForAccounts() {
+  const missingIds = store.accounts
+    .map(a => String(a.clientId))
+    .filter(id => id && id !== 'undefined' && !clientMap.value[id])
+  if (missingIds.length === 0) return
+  const unique = [...new Set(missingIds)]
+  const results = await Promise.allSettled(
+    unique.map(id => clientManagementApi.get(id))
+  )
+  const patch: Record<string, { ime: string; prezime: string; email: string }> = {}
+  results.forEach((res, i) => {
+    if (res.status === 'fulfilled') {
+      const data = res.value.data
+      const c = data.client ?? data
+      if (c?.ime) patch[unique[i]!] = { ime: c.ime, prezime: c.prezime, email: c.email }
+    }
+  })
+  if (Object.keys(patch).length > 0) {
+    clientMap.value = { ...clientMap.value, ...patch }
+  }
+}
+
 function clientName(clientId: string): string {
   const c = clientMap.value[clientId]
   return c ? `${c.prezime} ${c.ime}` : '—'
@@ -42,19 +65,24 @@ function cardOwnerName(clientId: number): string {
 const filterName = ref('')
 const filterBrojRacuna = ref('')
 
+async function fetchAndResolveNames() {
+  await store.fetchAllAccounts()
+  await ensureClientNamesForAccounts()
+}
+
 function applyFilters() {
   store.setFilters({
     clientName: filterName.value,
     accountNumber: filterBrojRacuna.value,
   })
-  store.fetchAllAccounts()
+  fetchAndResolveNames()
 }
 
 function clearFilters() {
   filterName.value = ''
   filterBrojRacuna.value = ''
   store.clearFilters()
-  store.fetchAllAccounts()
+  fetchAndResolveNames()
 }
 
 function tipLabel(tip: string) {
@@ -67,11 +95,26 @@ function vrstaLabel(vrsta: string) {
 
 // --- Cards panel ---
 const selectedAccount = ref<any>(null)
+const accountDetails = ref<AccountProto | null>(null)
+const detailsLoading = ref(false)
+const detailsError = ref('')
 const cards = ref<Card[]>([])
 const cardsLoading = ref(false)
 const cardsError = ref('')
 const actionError = ref('')
 const actionLoading = ref<number | null>(null) // card id being acted on
+
+function fmtCurrency(amount: number, kod: string) {
+  return `${amount.toLocaleString('sr-RS', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${kod}`
+}
+
+function statusAccountLabel(s: string) {
+  return { aktivan: 'Aktivan', neaktivan: 'Neaktivan', blokiran: 'Blokiran' }[s] ?? s
+}
+
+function statusAccountClass(s: string) {
+  return { aktivan: 'badge-active', neaktivan: 'badge-disabled', blokiran: 'badge-blocked' }[s] ?? 'badge-disabled'
+}
 
 function statusLabel(s: string) {
   return { aktivna: 'Aktivna', blokirana: 'Blokirana', deaktivirana: 'Deaktivirana' }[s] ?? s
@@ -92,22 +135,39 @@ function fmtDate(d: string) {
 
 async function openCards(account: any) {
   selectedAccount.value = account
+  accountDetails.value = null
+  detailsError.value = ''
   cards.value = []
   cardsError.value = ''
   actionError.value = ''
+
+  detailsLoading.value = true
   cardsLoading.value = true
-  try {
-    const res = await employeeCardApi.listByAccount(account.id)
-    cards.value = res.data ?? []
-  } catch (e: any) {
-    cardsError.value = e.response?.data?.error || 'Greška pri učitavanju kartica.'
-  } finally {
-    cardsLoading.value = false
+
+  const [detailsRes, cardsRes] = await Promise.allSettled([
+    accountApi.get(account.id),
+    employeeCardApi.listByAccount(account.id),
+  ])
+
+  if (detailsRes.status === 'fulfilled') {
+    accountDetails.value = detailsRes.value.data.account ?? detailsRes.value.data
+  } else {
+    detailsError.value = (detailsRes.reason as any)?.response?.data?.error || 'Greška pri učitavanju detalja računa.'
   }
+  detailsLoading.value = false
+
+  if (cardsRes.status === 'fulfilled') {
+    cards.value = cardsRes.value.data ?? []
+  } else {
+    cardsError.value = (cardsRes.reason as any)?.response?.data?.error || 'Greška pri učitavanju kartica.'
+  }
+  cardsLoading.value = false
 }
 
 function closePanel() {
   selectedAccount.value = null
+  accountDetails.value = null
+  detailsError.value = ''
   cards.value = []
   cardsError.value = ''
   actionError.value = ''
@@ -163,6 +223,7 @@ onMounted(async () => {
     store.fetchAllAccounts(),
     loadClientNames(),
   ])
+  await ensureClientNamesForAccounts()
 })
 </script>
 
@@ -217,7 +278,7 @@ onMounted(async () => {
             @click="openCards(account)"
           >
             <td><code style="font-size:13px">{{ account.brojRacuna }}</code></td>
-            <td style="font-weight:500">{{ clientName(account.clientId) }}</td>
+            <td style="font-weight:500">{{ account.clientId ? clientName(account.clientId) : account.naziv }}</td>
             <td>{{ vrstaLabel(account.vrsta) }}</td>
             <td>{{ tipLabel(account.tip) }}</td>
           </tr>
@@ -227,30 +288,84 @@ onMounted(async () => {
 
     <!-- Pagination -->
     <div v-if="store.total > store.pageSize" class="pagination">
-      <button class="btn-secondary btn-sm" :disabled="store.page <= 1" @click="store.page--; store.fetchAllAccounts()">←</button>
+      <button class="btn-secondary btn-sm" :disabled="store.page <= 1" @click="store.page--; fetchAndResolveNames()">←</button>
       <span>Strana {{ store.page }} od {{ totalPages() }} ({{ store.total }} ukupno)</span>
-      <button class="btn-secondary btn-sm" :disabled="store.page >= totalPages()" @click="store.page++; store.fetchAllAccounts()">→</button>
+      <button class="btn-secondary btn-sm" :disabled="store.page >= totalPages()" @click="store.page++; fetchAndResolveNames()">→</button>
     </div>
   </div>
 
-  <!-- Cards side panel -->
+  <!-- Account side panel -->
   <div v-if="selectedAccount" class="panel-overlay" @click.self="closePanel">
     <div class="panel">
       <div class="panel-header">
         <div>
-          <div class="panel-title">Kartice računa</div>
+          <div class="panel-title">Detalji računa</div>
           <code class="panel-subtitle">{{ selectedAccount.brojRacuna }}</code>
         </div>
         <button class="panel-close" @click="closePanel">✕</button>
       </div>
 
       <div class="panel-body">
+
+        <!-- Account details section -->
+        <div v-if="detailsLoading" class="panel-empty">Učitavam detalje...</div>
+        <div v-else-if="detailsError" class="panel-error" style="margin-bottom:16px">{{ detailsError }}</div>
+        <div v-else-if="accountDetails" class="details-section">
+          <div class="details-row">
+            <span class="details-label">Naziv</span>
+            <span class="details-value">{{ accountDetails.naziv || '—' }}</span>
+          </div>
+          <div class="details-row">
+            <span class="details-label">Vlasnik</span>
+            <span class="details-value">{{ accountDetails.clientId ? clientName(accountDetails.clientId) : accountDetails.naziv }}</span>
+          </div>
+          <div class="details-row">
+            <span class="details-label">Valuta</span>
+            <span class="details-value details-mono">{{ accountDetails.currencyKod }}</span>
+          </div>
+          <div class="details-row">
+            <span class="details-label">Tip</span>
+            <span class="details-value">{{ tipLabel(accountDetails.tip) }}</span>
+          </div>
+          <div class="details-row">
+            <span class="details-label">Vrsta</span>
+            <span class="details-value">{{ vrstaLabel(accountDetails.vrsta) }}</span>
+          </div>
+          <div v-if="accountDetails.podvrsta" class="details-row">
+            <span class="details-label">Podvrsta</span>
+            <span class="details-value">{{ accountDetails.podvrsta }}</span>
+          </div>
+          <div class="details-row">
+            <span class="details-label">Status</span>
+            <span :class="['card-badge', statusAccountClass(accountDetails.status)]">
+              {{ statusAccountLabel(accountDetails.status) }}
+            </span>
+          </div>
+          <div class="details-divider" />
+          <div class="details-row">
+            <span class="details-label">Stanje</span>
+            <span class="details-value details-amount">{{ fmtCurrency(accountDetails.stanje, accountDetails.currencyKod) }}</span>
+          </div>
+          <div class="details-row">
+            <span class="details-label">Raspoloživo</span>
+            <span class="details-value details-amount">{{ fmtCurrency(accountDetails.raspolozivoStanje, accountDetails.currencyKod) }}</span>
+          </div>
+          <div class="details-row">
+            <span class="details-label">Dnevni limit</span>
+            <span class="details-value details-mono">{{ fmtCurrency(accountDetails.dnevniLimit, accountDetails.currencyKod) }}</span>
+          </div>
+          <div class="details-row">
+            <span class="details-label">Mesečni limit</span>
+            <span class="details-value details-mono">{{ fmtCurrency(accountDetails.mesecniLimit, accountDetails.currencyKod) }}</span>
+          </div>
+        </div>
+
+        <!-- Cards section -->
+        <div class="panel-section-title">Kartice</div>
+
         <div v-if="cardsLoading" class="panel-empty">Učitavam kartice...</div>
         <div v-else-if="cardsError" class="panel-error">{{ cardsError }}</div>
-
-        <div v-else-if="cards.length === 0" class="panel-empty">
-          Ovaj račun nema kartica.
-        </div>
+        <div v-else-if="cards.length === 0" class="panel-empty">Ovaj račun nema kartica.</div>
 
         <div v-else>
           <div v-if="actionError" class="panel-error" style="margin-bottom:12px">{{ actionError }}</div>
@@ -300,6 +415,7 @@ onMounted(async () => {
             </div>
           </div>
         </div>
+
       </div>
     </div>
   </div>
@@ -333,6 +449,30 @@ onMounted(async () => {
 .panel-body { flex: 1; overflow-y: auto; padding: 20px 24px; }
 .panel-empty { text-align: center; color: #94a3b8; padding: 32px 0; font-size: 14px; }
 .panel-error { background: #fef2f2; color: #dc2626; padding: 10px 14px; border-radius: 8px; font-size: 13px; }
+
+/* Account details section */
+.details-section {
+  background: #f8fafc; border: 1px solid #e2e8f0;
+  border-radius: 12px; padding: 16px; margin-bottom: 20px;
+}
+.details-row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 6px 0; min-height: 28px;
+}
+.details-row + .details-row { border-top: 1px solid #f1f5f9; }
+.details-label {
+  font-size: 12px; color: #64748b; font-weight: 500;
+  text-transform: uppercase; letter-spacing: 0.4px; flex-shrink: 0;
+}
+.details-value { font-size: 14px; color: #0f172a; font-weight: 500; text-align: right; }
+.details-mono { font-family: 'SF Mono', monospace; font-size: 13px; }
+.details-amount { font-family: 'SF Mono', monospace; font-size: 14px; font-weight: 700; color: #0f172a; }
+.details-divider { border: none; border-top: 1px solid #e2e8f0; margin: 8px 0; }
+.panel-section-title {
+  font-size: 13px; font-weight: 700; color: #64748b;
+  text-transform: uppercase; letter-spacing: 0.5px;
+  margin-bottom: 12px;
+}
 
 /* Card rows */
 .card-row {

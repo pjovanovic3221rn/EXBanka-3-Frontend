@@ -1,10 +1,16 @@
 import { defineConfig } from 'cypress'
+import { cleanupCypressData } from './cypress/support/db-cleanup.js'
 
 export default defineConfig({
   e2e: {
     baseUrl: 'http://localhost',
     specPattern: 'cypress/e2e/**/*.cy.js',
     supportFile: false,
+    setupNodeEvents(on) {
+      on('after:run', () => {
+        cleanupCypressData()
+      })
+    },
   },
   env: {
     adminEmail: 'admin@bank.com',
